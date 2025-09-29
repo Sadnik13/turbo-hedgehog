@@ -1,22 +1,6 @@
-name: Backfill
-on:
-  workflow_dispatch:
-    inputs:
-      branch:
-        required: true
-        default: main
-      author_name:
-        required: false
-        default: Heatmap Bot
-      author_email:
-        required: false
-      dates_json:
-        required: true
-      message:
-        required: false
-        default: Backfill
 permissions:
   contents: write
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -24,32 +8,58 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{inputs.branch}}
+          ref: ${{ inputs.branch }}
+
+      - name: Prepare SSH signing key
+        if: ${{ secrets.REPO_SSH_SIGNING_KEY != '' }}
+        env:
+          SSH_KEY_B64: ${{ secrets.REPO_SSH_SIGNING_KEY }}
+          SSH_PASSPHRASE: ${{ secrets.REPO_SSH_SIGNING_PASSPHRASE }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY_B64" | base64 -d > ~/.ssh/signing_key
+          chmod 600 ~/.ssh/signing_key
+          # Конфигурация git на SSH-подписи
+          git config --global gpg.format ssh
+          git config --global user.signingkey ~/.ssh/signing_key.pub
+          # Сгенерировать публичную часть из приватной (для локальной проверки)
+          ssh-keygen -y -f ~/.ssh/signing_key > ~/.ssh/signing_key.pub
+          # Разрешённые подписанты (ускоряет верификацию локально)
+          mkdir -p ~/.config/git
+          echo "$(ssh-keygen -Y find-principals -f ~/.ssh/signing_key.pub 2>/dev/null || true)" >/dev/null
+          # Включить автоподпись коммитов
+          git config --global commit.gpgsign true
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Backfill commits
+
+      - name: Backfill commits (signed)
         shell: bash
         env:
-          DATES_JSON: ${{inputs.dates_json}}
-          BRANCH: ${{inputs.branch}}
-          AUTHOR_NAME: ${{inputs.author_name}}
-          AUTHOR_EMAIL: ${{inputs.author_email}}
-          DEFAULT_NO_REPLY: ${{github.actor}}@users.noreply.github.com
-          MSG_PREFIX: ${{inputs.message}}
+          DATES_JSON: ${{ inputs.dates_json }}
+          BRANCH: ${{ inputs.branch }}
+          AUTHOR_NAME: ${{ inputs.author_name }}
+          AUTHOR_EMAIL: ${{ inputs.author_email }}
+          DEFAULT_NO_REPLY: ${{ github.actor }}@users.noreply.github.com
+          MSG_PREFIX: ${{ inputs.message }}
         run: |
           set -e
           NAME="${AUTHOR_NAME:-Heatmap Bot}"
           EMAIL="${AUTHOR_EMAIL:-$DEFAULT_NO_REPLY}"
           git config user.name "$NAME"
           git config user.email "$EMAIL"
+
           echo "$DATES_JSON" > dates.json
           node -e 'const fs=require("fs"); const d=JSON.parse(fs.readFileSync("dates.json","utf8")); console.log(d.join("\n"));' > dates.txt
+
           while IFS= read -r ymd; do
             [ -z "$ymd" ] && continue
             mkdir -p daily
             echo "Backfill commit for $ymd" > "daily/$ymd.txt"
             git add .
-            GIT_AUTHOR_DATE="${ymd}T12:00:00" GIT_COMMITTER_DATE="${ymd}T12:00:00" git commit -m "${MSG_PREFIX:-Backfill} ${ymd}" --allow-empty --date "${ymd}T12:00:00"
+            GIT_AUTHOR_DATE="${ymd}T12:00:00" GIT_COMMITTER_DATE="${ymd}T12:00:00" \
+              git commit -S -m "${MSG_PREFIX:-Backfill} ${ymd}" --allow-empty --date "${ymd}T12:00:00"
           done < dates.txt
+
           git push origin HEAD:$BRANCH
